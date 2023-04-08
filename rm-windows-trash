@@ -1,0 +1,123 @@
+#!/bin/bash
+
+set -eu
+
+#
+# 使い方
+#
+
+usage_exit() {
+  echo 'usage: rm [-f | -i] [-Rr] file ...\n       unlink file' >&2
+  exit 1
+}
+
+
+#
+# 削除（ゴミ箱へ）
+#
+trash() {
+  (
+    echo '$shell = New-Object -ComObject Shell.Application'
+    echo '$trash = $shell.NameSpace(10)'
+    for arg in "$@"; do printf '$trash.MoveHere("%s")\n' "$(wslpath -aw "$arg")"; done
+  ) | powershell.exe -c -
+}
+
+
+#
+# オプション解析
+#
+
+# デフォルトオプション
+force=false        # 存在しない場合は無視
+interactive=false  # 対話
+recursive=false    # 再帰
+
+# オプションを一つずつ処理
+while getopts "firR" OPT; do
+  case $OPT in
+    f )
+      force=true
+      interactive=false
+      ;;
+    i )
+      interactive=true
+      force=false
+      ;;
+    r | R )
+      recursive=true
+      ;;
+    \? )
+      usage_exit
+      ;;
+  esac
+done
+
+# 処理済みのオプションを引数から削除
+shift $((OPTIND - 1))
+
+
+#
+# 削除対象の確認処理
+#
+
+# 削除対象が未指定なら終了
+[ $# -gt 0 ] || usage_exit
+
+# 削除対象を順番に確認
+targets=()
+sym_targets=()
+for target in "$@"; do
+  # 削除対象が存在するか判定
+  exists=false
+  if [ -L "$target" ] || [ -e "$target" ]; then
+    # シンボリックリンクの場合はリンク先ではなくリンクそのものを対象とするため true とする
+    exists=true
+  fi
+  # 削除対象が存在していない場合はエラー
+  if ! $force && ! $exists; then
+    echo "rm: $target: No such file or directory" >&2
+    exit 1
+  fi
+  # 削除対象がシンボリックリンクなら、ゴミ箱へは送らない
+  # リンク先が削除されてしまうので組み込み rm を使用する
+  symlink=false
+  if [ -L "$target" ]; then
+    symlink=true
+  fi
+  # 削除対象がディレクトリならエラー
+  if ! $symlink && ! $recursive && [ -d "$target" ]; then
+    echo "rm: $target: is a directory" >&2
+    exit 1
+  fi
+  # 対象を削除するかどうか確認する
+  if $interactive; then
+    printf "remove $target? " >&2
+    read yes_no
+    if [ "$yes_no" = "y" ]; then
+      # -i オプションが指定された場合は、削除処理を 1 つずつ実行する
+      if $symlink; then
+        \rm "$target"
+      else
+        trash "$target"
+      fi
+    fi
+  else
+    # 削除対象として登録
+    if $exists; then
+      if $symlink; then
+        sym_targets+=("$target")
+      else
+        targets+=("$target")
+      fi
+    fi
+  fi
+done
+
+# 削除処理を一括で行う
+if [ ${#targets[@]} -gt 0 ]; then
+  trash "${targets[@]}"
+fi
+if [ ${#sym_targets[@]} -gt 0 ]; then
+  \rm "${sym_targets[@]}"
+fi
